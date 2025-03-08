@@ -7,13 +7,14 @@ import pandas as pd
 import numpy as np
 import datetime
 import logging
+import xgboost as xgb
 
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, MinMaxScaler
 from sklearn.impute import SimpleImputer
 from sklearn.model_selection import train_test_split, GridSearchCV
-from sklearn.metrics import classification_report, f1_score
+from sklearn.metrics import classification_report, f1_score, roc_auc_score
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.ensemble import RandomForestClassifier
 from joblib import dump, load
@@ -40,6 +41,11 @@ def run(data_path, f1_criteria):
     """
     logging.info('Process Data...')
     df = data_processor.run(data_path)
+    # Convert categorical target ('Yes', 'No') to numerical (1, 0)
+    df[label] = df[label].map({"Yes": 1, "No": 0})
+
+    # Ensure no missing values after conversion
+    df = df.dropna(subset=[label])
     
     numerical_transformer = MinMaxScaler()
     categorical_transformer = OneHotEncoder(handle_unknown="ignore")
@@ -51,7 +57,7 @@ def run(data_path, f1_criteria):
     )
     
     # Train-Test Split
-    logging.info('Start Train-Test Split...')
+    '''logging.info('Start Train-Test Split...')
     X_train, X_test, y_train, y_test = train_test_split(df[features], \
                                                         df[label], \
                                                         test_size=appconfig.getfloat('Model','test_size'), \
@@ -77,7 +83,44 @@ def run(data_path, f1_criteria):
         mdl_meta = { 'name': appconfig['Model']['name'], 'metrics': f"f1:{score}" }
         model_registry.register(clf, features, mdl_meta)
     
-    logging.info('Training completed.')
+    logging.info('Training completed.')'''
+    logging.info('📌 Splitting Data into Train & Test...')
+    X_train, X_test, y_train, y_test = train_test_split(df[features], df[label], 
+                                                        test_size=appconfig.getfloat('Model', 'test_size'), 
+                                                        random_state=42)
+
+    # Define Model - XGBoost with Hyperparameter Tuning
+    logging.info('📌 Training XGBoost Classifier...')
+    xgb_model = xgb.XGBClassifier(objective="binary:logistic", eval_metric="logloss", use_label_encoder=False)
+
+    # Hyperparameter tuning
+    param_grid = {
+        "n_estimators": [50, 100, 200],
+        "max_depth": [3, 6, 9],
+        "learning_rate": [0.01, 0.1, 0.3]
+    }
+
+    grid_search = GridSearchCV(xgb_model, param_grid, scoring="f1", cv=5, n_jobs=-1)
+    clf = Pipeline(steps=[("preprocessor", preprocessor), ("classifier", grid_search)])
+    
+    # Fit the model
+    clf.fit(X_train, y_train)
+
+    # Evaluate Model
+    logging.info('📌 Evaluating Model Performance...')
+    y_pred = clf.predict(X_test)
+    f1 = f1_score(y_test, y_pred, average='weighted')
+    roc_auc = roc_auc_score(y_test, clf.predict_proba(X_test)[:, 1])
+
+    logging.info(f'✅ Model Performance: F1 Score = {f1:.4f}, AUC-ROC = {roc_auc:.4f}')
+
+    # Deploy Model if Performance is Good
+    if f1 >= f1_criteria:
+        logging.info('🚀 Deploying Model...')
+        mdl_meta = {'name': appconfig['Model']['name'], 'metrics': f"F1: {f1:.4f}, AUC-ROC: {roc_auc:.4f}"}
+        model_registry.register(clf, features, mdl_meta)
+    
+    logging.info('🎉 Training Completed!')
     return None
 
 if __name__ == "__main__":
